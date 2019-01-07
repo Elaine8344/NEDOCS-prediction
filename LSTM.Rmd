@@ -1,0 +1,291 @@
+---
+title: "LSTM"
+author: "Lin Ye"
+date: "November 18, 2018"
+output: html_document
+---
+### Model Rationale
+
+As the previous EDA demonstrated, NEDOCS SCORE shows seasonality in terms of time of the day, day of week and month of the year. Therefore, it is reasonable to believe time series is a possible solution since the data is dependent on time. However, based on the research and exploration from summer team and our own model exploration, time series could not provide a satisfying result. Alternatively, we implemented Long Short-Term Memory Neural Networks (LSTM) and this model achieved a much better result.  
+
+LSTM is a type of recurrent neural network. It is able to access its internal state to process sequences of inputs, which applies to our time-based data. Meanwhile, as NEDOCS score is calculated based on the equation, we decided using SCORE as the only inputs instead with other variables. 
+
+```{r include = FALSE, message = FALSE, warning = FALSE}
+rm(list = ls(all = TRUE)) 
+```
+
+
+```{r include = FALSE, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggridges)
+install.packages("devtools")
+library(devtools)
+devtools::install_github("rstudio/tensorflow")
+library(tensorflow)
+install_tensorflow()
+devtools::install_github("rstudio/keras")
+library(keras)
+install.packages('caret', dependencies = TRUE)
+library('caret')
+```
+
+
+
+```{r include = FALSE, message = FALSE,results='hide'}
+#read in data and cut the data ending at 2018-09-30 23:00:00
+NEDOCS<-read.csv('sch_combined.csv')
+NEDOCS$SCORE_DT_TM<-as.POSIXct(NEDOCS$SCORE_DT_TM,format="%Y-%m-%d %H:%M:%S")
+NEDOCS<-NEDOCS%>%filter(SCORE_DT_TM<='2018-09-30 23:15:00')
+summary(NEDOCS)
+```
+
+```{r include = FALSE, message = FALSE,results='hide' }
+# Use NEDOCS score as model input
+data<-NEDOCS[,c('SCORE_DT_TM','SCORE')]
+Series<-data$SCORE
+# one degree difference the data to make stationary
+diffed <- diff(Series, differences = 1)
+```
+
+```{r message = FALSE}
+# k step lag the dataset, here we set K=8 in order to forecast the data in the next 2 hours.
+lags <- function(x, k){
+    
+    lagged =  c(rep(NA, k), x[1:(length(x)-k)])
+    DF = as.data.frame(cbind(lagged, x))
+    colnames(DF) <- c( paste0('x-', k), 'x')
+    DF[is.na(DF)] <- 0
+    return(DF)
+  }
+supervised <- lags(diffed, 8)
+head(supervised,15)
+```
+
+```{r include = FALSE, message = FALSE,results='hide'}
+#Split the data into training and testing, where testing starts from 2017-09-30 23:00:00 to 2018-09-30 23:00:00.
+N <- nrow(supervised)
+n <- which(grepl("2017-09-30 23:00", data$SCORE_DT_TM,fixed=FALSE))
+train <- supervised[1:(n-1), ]
+test <- supervised[n:N,  ]
+```
+
+```{r include = FALSE, message = FALSE,results='hide'}
+#Neural network model needs the data to be scaled into the range of -1 to 1, the code below is used for achieving this goal.  
+normalize <- function(train, test, feature_range = c(0, 1)) {
+    x = train
+    fr_min = feature_range[1]
+    fr_max = feature_range[2]
+    std_train = ((x - min(x) ) / (max(x) - min(x)))
+    std_test  = ((test - min(x) ) / (max(x) - min(x)))
+    
+    scaled_train = std_train *(fr_max -fr_min) + fr_min
+    scaled_test = std_test *(fr_max -fr_min) + fr_min
+    
+    return( list(scaled_train = as.vector(scaled_train), scaled_test = as.vector(scaled_test) ,scaler= c(min =min(x), max = max(x))) )
+}
+
+Scaled <- normalize(train, test, c(-1, 1))
+  
+y_train <- Scaled$scaled_train[, 2]
+x_train <- Scaled$scaled_train[, 1]
+  
+y_test <- Scaled$scaled_test[, 2]
+x_test <- Scaled$scaled_test[, 1]
+```
+
+```{r include = FALSE, message = FALSE,results='hide'}
+# Inverter function is used for transform the scaled prediction value to the original value.
+inverter <- function(scaled, scaler, feature_range = c(0, 1)){
+    min = scaler[1]
+    max = scaler[2]
+    n = length(scaled)
+    mins = feature_range[1]
+    maxs = feature_range[2]
+    inverted_dfs = numeric(n)
+    
+    for( i in 1:n){
+      X = (scaled[i]- mins)/(maxs - mins)
+      rawValues = X *(max - min) + min
+      inverted_dfs[i] <- rawValues
+    }
+    return(inverted_dfs)
+  }
+```
+
+Structure training set into 3D, each dimention is samples, time step and feature.
+```{r message = FALSE}
+# LSTM requires input layer to be 3 dimensions format, the following code is used for reshape the training input data into 3D.
+#The three dimensions of this input are:
+#Samples: One sequence is one sample. A batch is comprised of one or more samples.
+#Time Steps: One time step is one point of observation in the sample.
+#Features: One feature is one observation at a time step.
+
+dim(x_train) <- c(length(x_train), 1, 1)
+dim(x_train)
+X_shape2 <- dim(x_train)[2]
+X_shape3 <- dim(x_train)[3]
+batch_size <- 1
+units <- 1
+```
+
+```{r include = FALSE, message = FALSE,results='hide'}
+#Define the model
+model <- keras_model_sequential() 
+model%>%
+    layer_lstm(units, batch_input_shape = c(batch_size, X_shape2, X_shape3), stateful= TRUE)%>%
+    layer_dense(units = 1)
+```
+
+Summary of the model.
+```{r message = FALSE}
+#Use mean square error as the loss function, Adaptive Monument Estimation (ADAM) as the optimization algorithm and 0.02 as learning rate and 1e-6 as learning rate decay over each update.
+model %>% compile(
+    loss = 'mean_squared_error',
+    optimizer = optimizer_adam( lr= 0.02 , decay = 1e-6 ),  
+    metrics = c('accuracy')
+  )
+summary(model)
+```
+
+```{r include = FALSE, message = FALSE,results='hide'}
+# Set shuffle=FALSE to avoid shuffling the training set and maintain the order of data set.
+Epochs <- 5
+nb_epoch <- Epochs   
+for(i in 1:nb_epoch ){
+    model %>% fit(x_train, y_train, epochs=1, batch_size=batch_size, verbose=1, shuffle=FALSE)
+    model %>% reset_states()
+}
+save_model_hdf5(model, 'LSTM_model.h5')
+model<- load_model_hdf5('LSTM_model.h5')
+
+```
+
+
+
+```{r include = FALSE, message = FALSE,results='hide'}
+# Prediction
+L <- length(x_test)
+dim(x_test) <- c(length(x_test), 1, 1)
+  
+scaler <- Scaled$scaler
+
+predictions <- numeric(L)
+for(i in 1:L){
+    X = x_test[i , , ]
+    dim(X) = c(1,1,1)
+    # forecast
+    yhat = model %>% predict(X, batch_size=batch_size)
+    
+    # invert scaling
+    yhat = inverter(yhat, scaler,  c(-1, 1))
+    
+    # invert differencing
+    yhat  = yhat + Series[(n+i)] 
+    
+    # save prediction
+    predictions[i] <- yhat
+}
+saveRDS(predictions,'LSTM_result.rds')
+
+```
+
+
+Plot comparison between predicted SCORE and actural SCORE.
+```{r }
+# plot the prediction data and the test data
+x1<-(nrow(data)-nrow(test)+1):nrow(data)
+plot(x1, Series[x1], type = "l", frame = FALSE, pch = 19, 
+     col = "red", xlab = "time", ylab = "SCORE")
+# Add a second line
+lines(x1, predictions, pch = 18, col = "blue", type = "l", lty = 2)
+# Add a legend to the plot
+legend("topleft", legend=c("Test", "Prediction"),
+       col=c("red", "blue"), lty = 1:2, cex=0.8)
+```
+
+```{r }
+# plot the prediction data and the test data
+x2<-(nrow(data)-99):nrow(data)
+plot(x2, Series[x2], type = "l", frame = FALSE, pch = 19, 
+     col = "red", xlab = "time", ylab = "SCORE")
+# Add a second line
+lines(x2, predictions[34927:35026], pch = 18, col = "blue", type = "l", lty = 2)
+# Add a legend to the plot
+legend("topleft", legend=c("Test", "Prediction"),
+       col=c("red", "blue"), lty = 1:2, cex=0.8)
+```
+
+The first plot is the plot of full test data. To make the plot more visible, the second plot is the comparison between the last 100 data points of predicted and actual data.  Based on the plot, predictions follow the trend of test data quite well. However, the value of prediction are larger than test data overall. 
+
+
+Confusion Matrix
+```{r  message = FALSE}
+
+test_hourlyclassify <-  as.factor(ifelse(Series[154826:189851] >= 100, "Orange/Red/Black", "Green/Yellow"))
+
+# Predict classification
+model_hourlyclassify <- as.factor(ifelse(predictions>= 100, "Orange/Red/Black", "Green/Yellow"))
+
+# Produce confusion matrix
+cm <- confusionMatrix(model_hourlyclassify , test_hourlyclassify, positive = "Orange/Red/Black")
+cm
+saveRDS(cm,'LSTM_confusionmatrix.rds')
+
+```
+
+```{r}
+draw_confusion_matrix <- function(cm, title = 'CONFUSION MATRIX') {
+
+  layout(matrix(c(1,1,2)))
+  par(mar=c(2,2,2,2))
+  plot(c(100, 345), c(300, 450), type = "n", xlab="", ylab="", xaxt='n', yaxt='n')
+  title(title, cex.main=2)
+
+  # create the matrix 
+  rect(150, 430, 240, 370, col='#3F97D0')
+  text(195, 435, 'Green/Yellow', cex=1.2)
+  rect(250, 430, 340, 370, col='#F7AD50')
+  text(295, 435, 'Orange/Red/Black', cex=1.2)
+  text(125, 370, 'Predicted', cex=1.3, srt=90, font=2)
+  text(245, 450, 'Actual', cex=1.3, font=2)
+  rect(150, 305, 240, 365, col='#F7AD50')
+  rect(250, 305, 340, 365, col='#3F97D0')
+  text(140, 400, 'Green/Yellow', cex=1.2, srt=90)
+  text(140, 335, 'Orange/Red/Black', cex=1.2, srt=90)
+
+  # add in the cm results 
+  res <- as.numeric(cm$table)
+  text(195, 400, paste(res[1], " (", round((res[1] / sum(res))*100, 2), "%)", sep = ""), cex=1.6, font=2, col='white')
+  text(195, 335, paste(res[2], " (", round((res[2] / sum(res))*100, 2), "%)", sep = ""), cex=1.6, font=2, col='white')
+  text(295, 400, paste(res[3], " (", round((res[3] / sum(res))*100, 2), "%)", sep = ""), cex=1.6, font=2, col='white')
+  text(295, 335, paste(res[4], " (", round((res[4] / sum(res))*100, 2), "%)", sep = ""), cex=1.6, font=2, col='white')
+
+  # add in the specifics 
+  plot(c(100, 0), c(100, 0), type = "n", xlab="", ylab="", main = "DETAILS", xaxt='n', yaxt='n')
+  text(10, 85, names(cm$byClass[1]), cex=1.2, font=2)
+  text(10, 70, round(as.numeric(cm$byClass[1]), 3), cex=1.2)
+  text(30, 85, names(cm$byClass[2]), cex=1.2, font=2)
+  text(30, 70, round(as.numeric(cm$byClass[2]), 3), cex=1.2)
+  text(50, 85, names(cm$byClass[3]), cex=1.2, font=2)
+  text(50, 70, round(as.numeric(cm$byClass[3]), 3), cex=1.2)
+  text(70, 85, names(cm$byClass[4]), cex=1.2, font=2)
+  text(70, 70, round(as.numeric(cm$byClass[4]), 3), cex=1.2)
+  text(90, 85, names(cm$byClass[7]), cex=1.2, font=2)
+  text(90, 70, round(as.numeric(cm$byClass[7]), 3), cex=1.2)
+
+  # add in the accuracy information 
+  bal <- (res[1] / ((res[1] + res[2])) + (res[4] / (res[3] + res[4]))) / 2
+  text(15, 35, names(cm$overall[1]), cex=1.5, font=2)
+  text(15, 20, round(as.numeric(cm$overall[1]), 3), cex=1.4)
+  text(50, 35, 'Balanced Accuracy', cex=1.5, font=2)
+  text(50, 20, round(as.numeric(bal), 3), cex=1.4)
+  text(85, 35, names(cm$overall[2]), cex=1.5, font=2)
+  text(85, 20, round(as.numeric(cm$overall[2]), 3), cex=1.4)
+}  
+
+result1<-draw_confusion_matrix(cm,title = 'CONFUSION MATRIX')
+
+
+```
+
