@@ -1,0 +1,278 @@
+---
+title: "Time_series model"
+author: "Lin Ye"
+date: "November 1, 2018"
+output: html_document
+---
+
+```{r}
+rm(list = ls(all = TRUE)) 
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(ggridges)
+library(reshape2)
+library(TTR)
+library(astsa)
+library(zoo)
+library(xts)
+library(forecast)
+library(caret)
+library(tseries)
+```
+
+```{r}
+NEDOCS<-read.csv('sch_combined.csv')
+NEDOCS$SCORE_DT_TM<-as.POSIXct(NEDOCS$SCORE_DT_TM,format="%Y-%m-%d %H:%M:%S")
+summary(NEDOCS)
+head(NEDOCS,20)
+```
+```{r}
+# round date to the nearest 15 minutes o'clock
+NEDOCS$TM_15ROUND<-round_date(NEDOCS$SCORE_DT_TM, unit = '15 minute')
+NEDOCS<-NEDOCS[c("SCORE_ID","SCORE","TM_15ROUND","TOTAL_ED_PATS","ED_PODS","ED_BEDS","ADMIT_PATS","HIGH_ACUITY_PATS","LONGEST_ADMIT_LOS","LONGEST_WAIT","DISTINCTPATCOUNT")]
+NEDOCS$PA_BED<-NEDOCS$TOTAL_ED_PATS/NEDOCS$ED_BEDS
+head(NEDOCS)
+summary(NEDOCS)
+str(NEDOCS)
+```
+
+```{r}
+#Only use data since 2014-01-01
+NEDOCS<-NEDOCS%>%filter(TM_15ROUND>="2014-01-01",TM_15ROUND<="2018-09-30 23:00:00")
+d<-NEDOCS%>%select("TOTAL_ED_PATS","TM_15ROUND","SCORE")
+# The most basic plot of ed_patient shows seasonlaity on yearly basis
+autoplot(ts(d$TOTAL_ED_PATS,start = 2014,frequency = 35040))
+```
+
+
+```{r}
+#ed_patients shows seasonal upward trend
+msts(
+  d$TOTAL_ED_PATS,
+  seasonal.periods = c(
+    96, # intervals in 1 day (24 hours)
+    168, # intervals in 1 week (24 hours * 7 days)
+    720, # intervals in 1 month (24 hours * 30 days)
+    8760 # intervals in 1 year (24 hours * 365 days)
+  ), start = 0
+) %>% mstl() %>% plot.ts()
+```
+
+```{r}
+ts<-ts(d$TOTAL_ED_PATS,start = 2014,frequency = 35040)
+eeadj<-ts%>% stl(s.window='periodic') %>% seasadj()
+```
+
+
+```{r}
+eeadj %>% diff() %>% ggtsdisplay(main="")
+```
+
+```{r}
+N <- nrow(d)
+n <- which(grepl("2017-09-30 23:00", d$TM_15ROUND,fixed=FALSE))
+train_data <- d[1:(n-1), ]
+test_data <- d[n:N,]
+```
+
+
+
+
+```{r}
+ts1<-ts(train_data$TOTAL_ED_PATS,start = 2014,frequency = 35040)
+ts1 %>% mstl() %>%
+  autoplot()
+```
+
+
+```{r}
+#acf reaches peak at lag around 96, which is close to daily seasonality
+ts1%>%ggtsdisplay(main="",lag.max = 100)
+```
+
+```{r}
+ts1 %>% diff(differences = 3) %>% ggtsdisplay(main="",lag.max = 100)
+```
+
+```{r}
+head(ts1)
+ts1 %>% diff(lag = 96)%>% ggtsdisplay(main="")
+```
+
+
+```{r}
+#sarima(ts1, 0,0,0,0,1,0,96)
+```
+```{r}
+#sarima(ts1,4,1,0,0,1,0,96)
+```
+
+```{r}
+#sarima(ts1,5,1,0,0,1,0,96)
+```
+```{r}
+#sarima(ts1, 5,1,0,0,1,0,96)
+```
+
+
+```{r}
+#sarima(ts1, 5,1,0,1,0,0,96)
+```
+```{r}
+#sarima(ts1, 5,1,0,0,0,0,96)
+```
+```{r}
+#sarima(ts1, 5,1,1,0,0,0,96)
+```
+
+
+
+```{r}
+#use
+#a<-sarima.for(ts1,n.ahead = 35027, 4,1,0,0,1,0,96)
+#a$pred
+```
+
+
+```{r}
+#accuracy(a$pred,test_data$TOTAL_ED_PATS)
+```
+
+```{r}
+#naive forecast for other variables
+NEDOCS_train<-NEDOCS[1:(n-1), ]
+NEDOCS_test<-NEDOCS[n:N,]
+NEDOCS_test$edbedf<-NEDOCS$ED_BEDS[NEDOCS$SCORE_ID>="219108"&NEDOCS$SCORE_ID<="254134"]
+NEDOCS_test$admitpatsf<-NEDOCS$ADMIT_PATS [NEDOCS$SCORE_ID>="219108"&NEDOCS$SCORE_ID<="254134"]
+NEDOCS_test$hospbedf<-NEDOCS$DISTINCTPATCOUNT[NEDOCS$SCORE_ID>="219108"&NEDOCS$SCORE_ID<="254134"]
+NEDOCS_test$highapf<-NEDOCS$HIGH_ACUITY_PATS[NEDOCS$SCORE_ID>="219108"&NEDOCS$SCORE_ID<="254134"]
+NEDOCS_test$longadmf<-NEDOCS$LONGEST_ADMIT_LOS[NEDOCS$SCORE_ID>="219108"&NEDOCS$SCORE_ID<="254134"]
+NEDOCS_test$longwaitf<-NEDOCS$LONGEST_WAIT[NEDOCS$SCORE_ID>="219108"&NEDOCS$SCORE_ID<="254134"]
+```
+
+```{r}
+NEDOCS_forecast1<-data.frame(cbind(a$pred,NEDOCS_test$edbedf,NEDOCS_test$admitpatsf,NEDOCS_test$hospbedf,NEDOCS_test$highapf,NEDOCS_test$longadmf,NEDOCS_test$longwaitf))
+NEDOCS_forecast1<-NEDOCS_forecast1%>%mutate(NEDOCS =(85.8*a$pred/NEDOCS_test$edbedf)+600*(NEDOCS_test$admitpatsf/NEDOCS_test$hospbedf)+13.4*(NEDOCS_test$highapf)+0.93*(NEDOCS_test$longadmf/60)+5.64*(NEDOCS_test$longwaitf/60))%>%mutate(orangered = as.factor(ifelse(NEDOCS >= 100, 1, 0))) %>%
+  mutate(color = ifelse(NEDOCS < 60, "Green",
+                 ifelse(NEDOCS < 100, "Yellow",
+                 ifelse(NEDOCS < 130, "Orange",
+                 ifelse(NEDOCS< 180, "Red", "Black")))))
+
+```
+
+```{r}
+test_data<-test_data%>%mutate(orangered = as.factor(ifelse(SCORE >= 100, 1, 0))) %>%
+  mutate(color = ifelse(SCORE < 60, "Green",
+                 ifelse(SCORE < 100, "Yellow",
+                 ifelse(SCORE < 130, "Orange",
+                 ifelse(SCORE < 180, "Red", "Black")))))
+```
+
+```{r}
+test_classify <-  as.factor(ifelse((test_data$SCORE)  >= 100, "Orange/Red", "Green/Yellow"))
+
+# Predict classification
+model_classify <- as.factor(ifelse((NEDOCS_forecast1$NEDOCS) >= 100, "Orange/Red", "Green/Yellow"))
+
+# Produce confusion matrix
+cm <- confusionMatrix(model_classify, test_classify, positive = "Orange/Red")
+cm
+```
+
+
+
+## Try to use hourly data to predict
+```{r}
+NEDOCS_hourly<-NEDOCS[minute(NEDOCS$TM_15ROUND)==0,]
+d_hourly<-NEDOCS_hourly%>%select("TOTAL_ED_PATS","TM_15ROUND","SCORE")
+train_hourlydata<- d_hourly %>% filter( TM_15ROUND < "2017-09-30 23:00:00")  
+test_hourlydata<- d_hourly %>% filter( TM_15ROUND >= "2017-09-30 23:00:00")  
+```
+
+```{r}
+ts2<-ts(train_hourlydata$TOTAL_ED_PATS,start = 2014,frequency = 8760)
+```
+
+```{r}
+b<-sarima.for(ts2,n.ahead = 8757, 3,1,1,1,1,1,24)
+```
+
+```{r}
+accuracy(b$pred,test_hourlydata$TOTAL_ED_PATS)
+```
+
+```{r}
+#naive forecast for other variables
+NEDOCS_hourlytrain<-NEDOCS_hourly%>%filter(TM_15ROUND < "2017-09-30 23:00:00")
+NEDOCS_hourlytest<-NEDOCS_hourly%>%filter(TM_15ROUND>="2017-09-30 23:00:00")
+NEDOCS_hourlytest$edbedf<-NEDOCS_hourly$ED_BEDS[NEDOCS_hourly$SCORE_ID>="219105"&NEDOCS_hourly$SCORE_ID<="254131"]
+NEDOCS_hourlytest$admitpatsf<-NEDOCS_hourly$ADMIT_PATS [NEDOCS_hourly$SCORE_ID>="219105"&NEDOCS_hourly$SCORE_ID<="254134"]
+NEDOCS_hourlytest$hospbedf<-NEDOCS_hourly$DISTINCTPATCOUNT[NEDOCS_hourly$SCORE_ID>="219105"&NEDOCS_hourly$SCORE_ID<="254134"]
+NEDOCS_hourlytest$highapf<-NEDOCS_hourly$HIGH_ACUITY_PATS[NEDOCS_hourly$SCORE_ID>="219105"&NEDOCS_hourly$SCORE_ID<="254134"]
+NEDOCS_hourlytest$longadmf<-NEDOCS_hourly$LONGEST_ADMIT_LOS[NEDOCS_hourly$SCORE_ID>="219105"&NEDOCS_hourly$SCORE_ID<="254134"]
+NEDOCS_hourlytest$longwaitf<-NEDOCS_hourly$LONGEST_WAIT[NEDOCS_hourly$SCORE_ID>="219105"&NEDOCS_hourly$SCORE_ID<="254134"]
+```
+
+```{r}
+NEDOCS_forecast2<-data.frame(cbind(b$pred,NEDOCS_hourlytest$edbedf,NEDOCS_hourlytest$admitpatsf,NEDOCS_hourlytest$hospbedf,NEDOCS_hourlytest$highapf,NEDOCS_hourlytest$longadmf,NEDOCS_hourlytest$longwaitf))
+NEDOCS_forecast2<-NEDOCS_forecast2%>%mutate(NEDOCS =(85.8*b$pred/NEDOCS_hourlytest$edbedf)+600*(NEDOCS_hourlytest$admitpatsf/NEDOCS_hourlytest$hospbedf)+13.4*(NEDOCS_hourlytest$highapf)+0.93*(NEDOCS_hourlytest$longadmf/60)+5.64*(NEDOCS_hourlytest$longwaitf/60))%>%mutate(orangered = as.factor(ifelse(NEDOCS >= 100, 1, 0))) %>%
+  mutate(color = ifelse(NEDOCS < 60, "Green",
+                 ifelse(NEDOCS < 100, "Yellow",
+                 ifelse(NEDOCS < 130, "Orange",
+                 ifelse(NEDOCS< 180, "Red", "Black")))))
+
+```
+
+```{r}
+test_hourlydata<-test_hourlydata%>%mutate(orangered = as.factor(ifelse(SCORE >= 100, 1, 0))) %>%
+  mutate(color = ifelse(SCORE < 60, "Green",
+                 ifelse(SCORE < 100, "Yellow",
+                 ifelse(SCORE < 130, "Orange",
+                 ifelse(SCORE < 180, "Red", "Black")))))
+```
+
+```{r}
+test_hourlyclassify <-  as.factor(ifelse((test_hourlydata$SCORE)  >= 100, "Orange/Red", "Green/Yellow"))
+
+# Predict classification
+model_hourlyclassify <- as.factor(ifelse((NEDOCS_forecast2$NEDOCS) >= 100, "Orange/Red", "Green/Yellow"))
+
+# Produce confusion matrix
+cm1 <- confusionMatrix(model_hourlyclassify , test_hourlyclassify, positive = "Orange/Red")
+cm1
+```
+
+auto.arima
+
+```{r}
+
+ts3<-ts(train_hourlydata$TOTAL_ED_PATS[train_hourlydata$TM_15ROUND>="2015-01-01 01:00:00"],start = 2015,frequency = 8760)
+decomp = stl(ts3, s.window="periodic")
+deseasonal_cnt <- seasadj(decomp)
+plot(decomp)
+```
+```{r}
+count_d1 = diff(deseasonal_cnt, differences = 1)
+plot(count_d1)
+adf.test(count_d1, alternative = "stationary")
+```
+```{r}
+fit<-auto.arima(deseasonal_cnt, seasonal=TRUE)
+fit
+```
+
+```{r}
+seas_fcast <- forecast(fit, h=8757)
+plot(seas_fcast)
+```
+
+
+
+
+
+
+
